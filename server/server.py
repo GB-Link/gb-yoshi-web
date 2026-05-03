@@ -135,7 +135,6 @@ class Game:
         self.admin_socket = admin_socket
         self.clients = [admin_socket]
         self.state = self.GAME_STATE_LOBBY
-        self.preset_rng = {'garbage': None, 'pieces': None, 'well_column': None} # if None, generate using near GB RNG
         self.is_matchmaking = is_matchmaking
         self.ready_clients = set()
         self.ready_timer = None
@@ -230,20 +229,8 @@ class Game:
         self.state = self.GAME_STATE_RUNNING
         for c in self.clients:
             c.state = Client.STATE_ALIVE
-        if self.preset_rng['garbage'] is not None:
-            garbage = self.preset_rng['garbage']
-        else:
-            garbage = Game.generate_random_garbage()
         await self.send_all({
-            "type": "garbage",
-            "garbage": garbage
-        })
-        pieces = Game.generate_pieces(256, beginning=self.preset_rng['pieces'])
-        if self.preset_rng['well_column'] is not None:
-            pieces = pieces[0:510] + self.preset_rng['well_column']
-        await self.send_all({
-            "type": "start_game",
-            "tiles": pieces
+            "type": "start_game"
         })
     
     async def _add_pending_clients(self):
@@ -266,67 +253,6 @@ class Game:
             if c.state == Client.STATE_ALIVE:
                 return c
         return None
-
-    # thx tolstoj
-    @staticmethod
-    def generate_random_garbage():
-        initial_stack = ""
-        tile_length = []
-        current_index = 0
-        #possible_minos = ["0C", "1D", "0E", "0C", "27"]
-        mino_pointer = 0
-        sum = 0
-        while sum < 100:
-            random_length = random.randint(1, 5)
-            sum += random_length
-            tile_length.append(random_length)
-        if sum > 100:
-            tile_length[-1] -= (sum - 100)
-        for i in range(len(tile_length)):
-            for j in range(tile_length[i]):
-                if i % 2 == 0:
-                    # this generates which mino is shown
-                    initial_stack += random.choice(["80","81","82","83","84","85","86","87"])
-                    #initial_stack += possible_minos[mino_pointer % 5]
-                    #mino_pointer += 1
-                else:
-                    # no mino
-                    initial_stack += "2F"
-        print(initial_stack)
-        return initial_stack
-
-    @staticmethod
-    def generate_pieces(num_pieces, beginning=None):
-        tiles = [
-            "00", # L
-            "04", # J
-            "08", # I
-            "0C", # O
-            "10", # Z
-            "14", # S
-            "18"  # T
-        ]
-        if beginning is None:
-            beginning = ''
-            pieces_array = []
-        else:
-            # TODO: make sure it doesn't fail when pieces are rotated
-            pieces_array = [int(beginning[i:i + 2], 16) // 4 for i in range(0, len(beginning), 2)]
-
-        for i in range(len(pieces_array), 2):
-            pieces_array.append(random.randint(0, 255) % 7)
-        three = 0
-        for i in range(len(pieces_array), num_pieces):
-            for j in range(3):
-                new_piece = random.randint(0, 255) % 7
-                if pieces_array[i-2] != (pieces_array[i - 2] | pieces_array[i - 1] | new_piece):
-                    break
-            pieces_array.append(new_piece)
-            if pieces_array[i] == 6 and pieces_array[i-2] == pieces_array[i-1] and pieces_array[i-2] == pieces_array[i]:
-                three += 1
-        random_pieces_as_string = ''.join(list(map(lambda x : tiles[x], pieces_array)))
-        return beginning + random_pieces_as_string[len(beginning):]
-
 
     async def process(self, client, msg):
         print(f"Processing {client.name} with msg {msg}")
@@ -371,26 +297,6 @@ class Game:
             await self._add_pending_clients()
             await self.send_reached_30_lines(client.uuid)
             await self.send_gameinfo()
-        elif msg["type"] == "preset_rng":
-            # Check if game state is correct.
-            if self.state != self.GAME_STATE_LOBBY:
-                print("Error: Game already running or finished")
-                return
-            # Check if admin.
-            if client != self.admin_socket:
-                print("Error: Not an admin.")
-                return
-            print('msg received')
-            print(msg)
-            if 'garbage' in msg and msg['garbage'] is not None and len(msg["garbage"]) == 200:
-                print('received custom garbage')
-                self.preset_rng['garbage'] = msg["garbage"]
-            else:
-                print('bad custom garbage length. must be a string of exactly 200 hex-nibbles')
-            if 'pieces' in msg and msg['pieces'] is not None and len(msg['pieces']) > 0 and len(msg['pieces']) % 2 == 0:
-                self.preset_rng['pieces'] = msg['pieces'][:512] # preset no more than 256 pieces
-            if 'well_column' in msg and msg['well_column'] is not None and len(msg['well_column']) == 2:
-                self.preset_rng['well_column'] = msg['well_column']
         elif msg["type"] == "dead":
             if self.state == self.GAME_STATE_FINISHED or self.state == self.GAME_STATE_BETWEEN:
                 print("User might just have died.. ignore")

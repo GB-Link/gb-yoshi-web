@@ -7,23 +7,6 @@
 const WEBSOCKET_HOST = 'yoshiserver.gblink.io';
 const WEBSOCKET_PORT = 443;
 
-// Note: fromHexString is already defined in serial.js which loads first
-
-function getWell(hexNum) {
-    console.log(hexNum);
-    if (hexNum === 0x0c) {
-        return 2;
-    } else if (hexNum === 0x04 || hexNum === 0x18) {
-        return 4;
-    } else if (hexNum === 0x00 || hexNum === 0x10) {
-        return 6;
-    } else if (hexNum === 0x08) {
-        return 8;
-    } else {
-        return 10;
-    }
-}
-
 class GBWebsocket {
     // Needs to be in sync with server!!!
     GAME_STATE_LOBBY = 0
@@ -248,16 +231,8 @@ class GBWebsocket {
                 this.uuid = message.uuid;
                 this.onuserinfo(this);
                 break;
-            case "garbage":
-                console.log("garbage:")
-                console.log(message.garbage);
-                this.garbage = fromHexString(String(message.garbage));
-                break;
             case "start_game":
                 console.log("Game starting!");
-                console.log("Tiles:")
-                console.log(message.tiles);
-                this.tiles = fromHexString(String(message.tiles));
                 this.ongamestart(this);
                 break;
             case "game_update":

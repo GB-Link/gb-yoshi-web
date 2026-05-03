@@ -22,7 +22,7 @@ WebSocket server settings are in `js/gbwebsocket.js`:
 
 ---
 
-# Backend Server (`server/`)
+# Backend Server
 
 WebSocket server for this client lives in the `server/` subdirectory.
 
