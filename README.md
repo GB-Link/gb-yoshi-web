@@ -60,7 +60,7 @@ The server runs on port `5678` by default. Configure your reverse proxy (nginx, 
 apt install screen
 chmod +x server/startdetached.sh
 crontab -e
-@reboot screen -S yoshiserver -d -m ~/gb-yoshi-web/server/startdetached.sh
+@reboot ~/gb-yoshi-web/server/startdetached.sh
 ```
 
 Access the running server window with `screen -r yoshiserver`
