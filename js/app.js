@@ -816,6 +816,7 @@ class OnlineYoshi {
             // Priority: loss-ack 0x81 > force-loss 0xC3 > win-ack 0x80 >
             // hatch > continuous max-slots keep-alive.
             let byteToSend;
+            let sentHatch = false;
             if (this.lossPending) {
                 byteToSend = 0x81;
             } else if (this.forceLossPending) {
@@ -824,6 +825,7 @@ class OnlineYoshi {
                 byteToSend = 0x80;
             } else if (this.hatchQueue.length > 0) {
                 byteToSend = this.hatchQueue.shift();
+                sentHatch = true;
                 console.log("Sending hatch byte to GB:", byteToSend.toString(16));
             } else {
                 // Continuous max-slots keep-alive — mirrors Tetris's "send
@@ -844,8 +846,13 @@ class OnlineYoshi {
                 }
             }
 
-            this.serial.send(new Uint8Array([byteToSend]));
-            this.serial.read(64).then(result => {
+            // Await the send before reading (matches the Tetris pump). On
+            // WebSerial this commits the write — and surfaces a write reject to
+            // the error handler — before we wait for its reply, instead of
+            // firing both in parallel and silently losing a failed write.
+            this.serial.send(new Uint8Array([byteToSend]))
+                .then(() => this.serial.read(64))
+                .then(result => {
                 if (!this.gameLoopActive) {
                     return;
                 }
@@ -1014,13 +1021,16 @@ class OnlineYoshi {
 
                 if (this.gameLoopActive) this.startGameTimer();
             }, (err) => {
-                // A read timeout/hiccup must not freeze the round. Without this
-                // the loop would silently stop on a single transient error (the
-                // failure Tetris hit before adding a catch to its pump). Drop
-                // any late-arriving frame so reads stay aligned with sends, then
-                // keep clocking.
-                console.warn("Game-loop read error, recovering:", err);
+                // A send/read timeout or hiccup must not freeze the round or
+                // silently drop a byte. Because the send is now awaited, this
+                // also fires on a write reject (the failure Tetris hit before
+                // its pump awaited the send and caught errors).
+                console.warn("Game-loop send/read error, recovering:", err);
                 if (this.gameLoopActive) {
+                    // Don't lose a once-only hatch byte to a transient failure;
+                    // put it back at the front of the queue to re-send next tick.
+                    if (sentHatch) this.hatchQueue.unshift(byteToSend);
+                    // Drop any late-arriving frame so reads stay aligned with sends.
                     this.serial.flushReads();
                     setTimeout(() => { if (this.gameLoopActive) this.startGameTimer(); }, 50);
                 }
