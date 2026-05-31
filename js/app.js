@@ -961,8 +961,8 @@ class OnlineYoshi {
                         this.roundConfirmed = true;
                     } else if (value === 0x81) {
                         // residual win-ack byte — silently ignore
-                    } else if (value >= 0x21 && value <= 0x3C) {
-                        // local slot count update (0x21=1 slot ... 0x3C=28 slots)
+                    } else if (value >= 0x20 && value <= 0x3C) {
+                        // local slot count update (0x20=0 slots ... 0x3C=28 slots).
                         this.roundConfirmed = true;
                         this.updateSlots(value - 0x20);
                     } else if (value >= 0x40 && value <= 0x47) {
