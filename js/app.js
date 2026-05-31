@@ -43,24 +43,25 @@ class OnlineYoshi {
         this.countdownInterval = null;
 
         // Yoshi-specific protocol state
-        this.hatchQueue = [];           // bytes 0x41-0x47 to send to local GB once each
-        this.lastSentMaxSlots = 0;       // last partner-slot byte we wrote (avoid duplicate sends)
+        this.hatchQueue = [];           // bytes 0x40-0x47 to send to local GB once each
+        this.lastSentMaxSlots = 0;       // last partner-slot byte we wrote (avoid log spam)
         this.difficultyTimerActive = false; // poll the GB for level/speed changes pre-match
         // End-of-round handshake state (BGB-debugged per Yoshi protocol).
         this.lossPending = false;        // local GB lost — reply 0x81 until GB stops sending 0x80
         this.winPending = false;         // local GB won or server-told win — send 0x80 until GB leaves win-state
         this.winTickCount = 0;           // ticks elapsed since winPending started
         this.forceLossPending = false;   // server-told loss — send 0xC3 until GB enters loss-state (0x80)
+        this.roundConfirmed = false;     // GB has emitted an in-round byte this round; gates win/loss bytes against stale leftovers from the prior round
         this.winsThisSeries = 0;
         this.lossesThisSeries = 0;
         this.needsRehandshake = false;   // true once series hits 3 wins or 3 losses
+        this._seriesEndProbe = 0x55;     // alternates 0x55/0x01 during the series-end rehandshake
 
         this.init();
     }
 
     init() {
-        // Check for WebUSB support
-        if (!navigator.usb) {
+        if (!navigator.usb && !navigator.serial) {
             this.showScreen('screen-no-webusb');
             return;
         }
@@ -95,8 +96,16 @@ class OnlineYoshi {
     }
 
     bindEvents() {
-        // Connect button
-        document.getElementById('btn-connect').addEventListener('click', () => this.handleConnectClick());
+        // Prefer WebUSB; fall back to WebSerial (Firefox 151+, or Chromium
+        // with WebUSB disabled). Only one connect button is ever shown.
+        const hasUsb = ('usb' in navigator);
+        const hasSerial = ('serial' in navigator);
+        this.transport = hasUsb ? 'usb' : (hasSerial ? 'serial' : null);
+        const connectBtn = document.getElementById('btn-connect');
+        if (this.transport) {
+            connectBtn.textContent = this.transport === 'usb' ? 'Connect USB' : 'Connect Serial';
+            connectBtn.addEventListener('click', () => this.handleConnectClick(this.transport));
+        }
 
         // Create/Join game buttons
         document.getElementById('btn-create-game').addEventListener('click', () => {
@@ -356,13 +365,12 @@ class OnlineYoshi {
         return `Lv ${level} / ${speed}`;
     }
 
-    // Connection handling
-    handleConnectClick() {
-        this.serial = new Serial();
+    handleConnectClick(kind = 'usb') {
+        this.serial = (kind === 'serial') ? new SerialWS() : new Serial();
         this.setState(this.StateConnecting);
 
         this.serial.getDevice().then(() => {
-            console.log("USB connected, updating status.");
+            console.log(`${kind === 'serial' ? 'Serial' : 'USB'} connected, updating status.`);
             this.setState(this.StateConnectingYoshi);
             this.attemptYoshiConnection();
         }).catch(c => {
@@ -428,7 +436,7 @@ class OnlineYoshi {
                 }
                 this.startDifficultyTimer();
             });
-        }, 100);
+        }, 10);
     }
 
     // Mode selection handlers
@@ -700,6 +708,7 @@ class OnlineYoshi {
         this.winPending = false;
         this.winTickCount = 0;
         this.forceLossPending = false;
+        this.roundConfirmed = false;
         this._handlingDisconnect = false;
 
         for (var user of this.users) {
@@ -778,7 +787,16 @@ class OnlineYoshi {
     }
 
     startGameTimer() {
-        setTimeout(() => {
+        // Run as fast as USB roundtrip allows — no setTimeout. Each USB
+        // transferOut+transferIn pair takes ~2-4 ms, and the firmware
+        // (GBModule::normalModeLoop in GBLink-Firmware) handles single-byte
+        // sends with one SPI exchange + 1 ms post-wait. That gives us
+        // ~250-330 SPI cycles/sec, close to the native GB cable rate
+        // (1000 cycles/sec). Yoshi's slot bytes are written into the GB's
+        // SB register for roughly one frame (~16 ms) before being cleared,
+        // so we should hit every update at this rate. The transferIn await
+        // is the natural yield point for WebSocket messages.
+        const tick = () => {
             if (!this.gameLoopActive) {
                 console.log("Game loop stopped");
                 return;
@@ -786,8 +804,7 @@ class OnlineYoshi {
 
             // Decide what byte to send to the local GB this tick.
             // Priority: loss-ack 0x81 > force-loss 0xC3 > win-ack 0x80 >
-            // hatch > changed max-slots > idle 0x00. End-of-round
-            // handshakes are BGB-debugged byte sequences driven by the loop.
+            // hatch > continuous max-slots keep-alive.
             let byteToSend;
             if (this.lossPending) {
                 byteToSend = 0x81;
@@ -799,6 +816,8 @@ class OnlineYoshi {
                 byteToSend = this.hatchQueue.shift();
                 console.log("Sending hatch byte to GB:", byteToSend.toString(16));
             } else {
+                // Continuous max-slots keep-alive — mirrors Tetris's "send
+                // height every tick" pattern.
                 var maxSlots = 0;
                 if (this.gb) {
                     var aliveOpponents = this.gb.getOtherUsers().filter(u => u.state === this.STATE_ALIVE);
@@ -808,12 +827,10 @@ class OnlineYoshi {
                     }
                 }
                 if (maxSlots > 28) maxSlots = 28;
+                byteToSend = 0x20 + maxSlots;
                 if (maxSlots !== this.lastSentMaxSlots) {
-                    byteToSend = 0x20 + maxSlots;
                     this.lastSentMaxSlots = maxSlots;
-                    console.log("Sending max-slots update to GB:", byteToSend.toString(16));
-                } else {
-                    byteToSend = 0x00;
+                    console.log("Max-slots changed, sending to GB:", byteToSend.toString(16));
                 }
             }
 
@@ -874,10 +891,10 @@ class OnlineYoshi {
                 }
 
                 if (this.winPending) {
-                    // We just sent 0x80 this tick. The protocol minimum is
-                    // three acked exchanges; after that we wait for the GB
-                    // to leave its win-state (no longer responding C3 or 81).
-                    // Both paths converge here: remote-win flows through 0x81
+                    // We just sent 0x80 this tick. Protocol minimum is three
+                    // acked exchanges; after that we wait for the GB to leave
+                    // its win-state (no longer responding C3 or 81). Both
+                    // paths converge here: remote-win flows through 0x81
                     // ticks, local-win flows through 0xC3 ticks.
                     this.winTickCount++;
                     const stillInWinState = (lastByte === 0xC3 || lastByte === 0x81);
@@ -910,21 +927,38 @@ class OnlineYoshi {
                 // one read when the GB has been emitting faster than 100ms.
                 for (var i = 0; i < bytes.length; i++) {
                     var value = bytes[i];
-                    if (value === 0x00 || value === 0x81) {
-                        // idle / residual win-ack byte — silently ignore
+                    if (value === 0x00) {
+                        // In-round idle byte. Its arrival means the GB has left
+                        // the prior round's win/loss screen, so any 0x80/0xC3
+                        // after this is a real result rather than a stale byte.
+                        this.roundConfirmed = true;
+                    } else if (value === 0x81) {
+                        // residual win-ack byte — silently ignore
                     } else if (value >= 0x21 && value <= 0x3C) {
                         // local slot count update (0x21=1 slot ... 0x3C=28 slots)
+                        this.roundConfirmed = true;
                         this.updateSlots(value - 0x20);
                     } else if (value >= 0x40 && value <= 0x47) {
                         // local player hatched a yoshi of size (value & 0x0f);
                         // size 0 (0x40) is the smallest yoshi and clears no slots
                         // but is still an offensive move to forward to opponents.
+                        if (!this.roundConfirmed) {
+                            // Round hasn't started yet — this is a leftover
+                            // difficulty/handshake byte, not a real hatch.
+                            continue;
+                        }
                         var hatchSize = value & 0x0f;
                         console.log("Local hatch size:", hatchSize);
                         if (this.gb) this.gb.sendLines(hatchSize);
                     } else if (value === 0x80) {
                         // Local GB lost. Enter the loss-ack handshake; subsequent
                         // ticks reply 0x81 until the GB stops sending 0x80.
+                        if (!this.roundConfirmed) {
+                            // Stale 0x80 left in the USB read buffer by the prior
+                            // round's loss handshake (clearBuffer only drains the
+                            // outgoing queue). Ignore until the round is confirmed.
+                            continue;
+                        }
                         console.log("Local GB lost - entering loss handshake");
                         this.lossPending = true;
                         break;
@@ -932,6 +966,11 @@ class OnlineYoshi {
                         // Local GB won (cleared all slots). Tell the server so
                         // the opponent gets a reached_30_lines, then enter the
                         // win-ack handshake to feed our own GB its 0x80 acks.
+                        if (!this.roundConfirmed) {
+                            // Stale 0xC3 from the prior round's win handshake —
+                            // ignore until the GB confirms the new round started.
+                            continue;
+                        }
                         console.log("Local GB won - entering win handshake");
                         if (this.gb) this.gb.sendReached30Lines();
                         if (!this.winPending && !this.lossPending && !this.forceLossPending) {
@@ -946,35 +985,40 @@ class OnlineYoshi {
 
                 if (this.gameLoopActive) this.startGameTimer();
             });
-        }, 100);
+        };
+        tick();
     }
 
     performSeriesEndRehandshake() {
-        // After 3 wins or 3 losses the GB has stopped at a series-end
-        // screen. Per BGB notes: wait ~1s, send 0x55 (returns GB to main
-        // menu), then start the 0x01/0x02 handshake (returns GB to
-        // difficulty-select). Once the 0x02 reply arrives the user has
-        // until the next round starts to change their difficulty.
+        // After 3 wins or 3 losses the GB finishes its win/loss animation,
+        // sits briefly on the per-round result screen (waiting for 0x55),
+        // then — because the series is over — 0x55 drops it to the title
+        // screen instead of a new round. From the title screen the start
+        // handshake (0x01 -> 0x02) returns it to difficulty-select. The
+        // animation length varies (longest when we won by the opponent
+        // topping out), so attemptSeriesEndHandshake alternates 0x55/0x01
+        // until it lands rather than timing a single 0x55 against it.
         console.log("Series-end rehandshake scheduled (1s delay)");
         setTimeout(() => {
             if (!this.needsRehandshake) {
                 console.log("Series-end rehandshake aborted (flag cleared)");
                 return;
             }
-            console.log("Series-end: sending 0x55 to leave the win/loss screen");
             this.serial.clearBuffer();
-            this.serial.bufSendHex("55", 50);
-            // Give the buffered 0x55 time to flush before driving 0x01/0x02
-            setTimeout(() => {
-                if (!this.needsRehandshake) return;
-                this.attemptSeriesEndHandshake();
-            }, 300);
+            this._seriesEndProbe = 0x55;
+            this.attemptSeriesEndHandshake();
         }, 1000);
     }
 
     attemptSeriesEndHandshake() {
         if (!this.needsRehandshake) return;
-        this.serial.sendHex("01");
+        // Alternate 0x55 (dismiss the per-round result screen) and 0x01
+        // (probe the title screen) until the GB answers 0x01 with 0x02. This
+        // is timing-independent: a 0x55 on the title screen and a 0x01 on the
+        // result screen are both ignored, so the alternation can't get stuck
+        // no matter how long the win/loss animation takes to finish.
+        const probe = this._seriesEndProbe === 0x01 ? 0x01 : 0x55;
+        this.serial.send(new Uint8Array([probe]));
         this.serial.readHex(64).then(result => {
             if (!this.needsRehandshake) return;
             if (result === "02") {
@@ -991,11 +1035,13 @@ class OnlineYoshi {
                 if (this.currentState === this.StateFinished) {
                     this.updateUI();
                 }
-            } else {
-                setTimeout(() => this.attemptSeriesEndHandshake(), 100);
+                return;
             }
+            this._seriesEndProbe = probe === 0x55 ? 0x01 : 0x55;
+            setTimeout(() => this.attemptSeriesEndHandshake(), 50);
         }, error => {
             console.error("Series-end rehandshake transferIn error:", error);
+            this._seriesEndProbe = probe === 0x55 ? 0x01 : 0x55;
             setTimeout(() => this.attemptSeriesEndHandshake(), 100);
         });
     }
