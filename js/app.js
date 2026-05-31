@@ -50,6 +50,8 @@ class OnlineYoshi {
         this.lossPending = false;        // local GB lost — reply 0x81 until GB stops sending 0x80
         this.winPending = false;         // local GB won or server-told win — send 0x80 until GB leaves win-state
         this.winTickCount = 0;           // ticks elapsed since winPending started
+        this.lossTickCount = 0;          // ticks elapsed since lossPending started
+        this.lossClearStreak = 0;        // consecutive non-0x80 reads during the loss handshake
         this.forceLossPending = false;   // server-told loss — send 0xC3 until GB enters loss-state (0x80)
         this.roundConfirmed = false;     // GB has emitted an in-round byte this round; gates win/loss bytes against stale leftovers from the prior round
         this.winsThisSeries = 0;
@@ -706,6 +708,8 @@ class OnlineYoshi {
         this.lossPending = false;
         this.winPending = false;
         this.winTickCount = 0;
+        this.lossTickCount = 0;
+        this.lossClearStreak = 0;
         this.forceLossPending = false;
         this.roundConfirmed = false;
         this._handlingDisconnect = false;
@@ -859,11 +863,26 @@ class OnlineYoshi {
                 // -- End-of-round handshake handling --
 
                 if (this.lossPending) {
-                    // We replied 0x81 this tick. Keep replying until the GB
-                    // stops sending 0x80 — that's our signal that the GB has
-                    // counted enough acks and transitioned to its loss screen.
-                    if (lastByte !== 0x80) {
-                        console.log("Loss handshake complete (GB stopped sending 0x80)");
+                    // We reply 0x81 each tick. The GB sends 0x80 until it has
+                    // taken enough acks, then transitions to its loss screen and
+                    // goes silent. Require a minimum number of acks AND two
+                    // consecutive non-0x80 reads before completing: a single
+                    // transient non-0x80 byte must not end the handshake before
+                    // the GB has actually left loss-state (that stranded a GB
+                    // once, logging "complete" while it never reached the loss
+                    // screen). A 0x80 resets the streak, so a GB that needs more
+                    // acks just keeps getting them.
+                    this.lossTickCount++;
+                    if (lastByte === 0x80) {
+                        this.lossClearStreak = 0;
+                    } else {
+                        this.lossClearStreak++;
+                    }
+                    const lossDone = this.lossTickCount >= 3 && this.lossClearStreak >= 2;
+                    const lossTimedOut = this.lossTickCount >= 30; // ~3s safety
+                    if (lossDone || lossTimedOut) {
+                        if (lossTimedOut) console.warn("Loss handshake timed out at tick " + this.lossTickCount);
+                        else console.log("Loss handshake complete (GB left loss-state)");
                         this.lossPending = false;
                         this.gameLoopActive = false;
                         this.lossesThisSeries++;
@@ -891,6 +910,8 @@ class OnlineYoshi {
                         console.log("Force-loss complete - GB now in loss-state");
                         this.forceLossPending = false;
                         this.lossPending = true;
+                        this.lossTickCount = 0;
+                        this.lossClearStreak = 0;
                     }
                     if (this.gameLoopActive) this.startGameTimer();
                     return;
@@ -967,6 +988,8 @@ class OnlineYoshi {
                         }
                         console.log("Local GB lost - entering loss handshake");
                         this.lossPending = true;
+                        this.lossTickCount = 0;
+                        this.lossClearStreak = 0;
                         break;
                     } else if (value === 0xC3) {
                         // Local GB won (cleared all slots). Tell the server so
