@@ -221,6 +221,14 @@ class SerialWS {
         this.send_active = false;
     }
 
+    // Drop any received-but-unconsumed data frames. Reply frames pile up here
+    // if a send was never read back, or if a read() timed out and its frame
+    // arrived afterward; left in place they offset every later read by one and
+    // desync the link. Called at round start to guarantee a clean read stream.
+    flushReads() {
+        this._dataQueue = [];
+    }
+
     bufSendFunction() {
         this.send_active = true;
         if (this.buffer.length === 0) {

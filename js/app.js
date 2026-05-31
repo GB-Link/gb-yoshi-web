@@ -55,7 +55,6 @@ class OnlineYoshi {
         this.winsThisSeries = 0;
         this.lossesThisSeries = 0;
         this.needsRehandshake = false;   // true once series hits 3 wins or 3 losses
-        this._seriesEndProbe = 0x55;     // alternates 0x55/0x01 during the series-end rehandshake
 
         this.init();
     }
@@ -721,13 +720,20 @@ class OnlineYoshi {
 
         // Yoshi: a single 0x55 starts each round. Both clients send it to
         // their own slave GB; the GBs coordinate the round start internally.
-        this.serial.clearBuffer();
-        this.serial.bufSendHex("55", 50);
-
-        setTimeout(() => {
-            this.gameLoopActive = true;
-            this.startGameTimer();
-        }, 500);
+        // The firmware replies one frame per byte we send, so the 0x55 must be
+        // read back like any other send — a fire-and-forget write leaves its
+        // reply frame in the WebSerial receive queue, which then offsets every
+        // later read by one and desyncs the link after a few rounds. Flush any
+        // stale frames first (e.g. from a read that timed out mid-handshake).
+        this.serial.flushReads();
+        const startLoop = () => {
+            setTimeout(() => {
+                this.gameLoopActive = true;
+                this.startGameTimer();
+            }, 500);
+        };
+        this.serial.send(new Uint8Array([0x55]));
+        this.serial.read(64).then(startLoop, startLoop);
     }
 
     gbGameUpdate(gb) {
@@ -984,41 +990,67 @@ class OnlineYoshi {
                 }
 
                 if (this.gameLoopActive) this.startGameTimer();
+            }, (err) => {
+                // A read timeout/hiccup must not freeze the round. Without this
+                // the loop would silently stop on a single transient error (the
+                // failure Tetris hit before adding a catch to its pump). Drop
+                // any late-arriving frame so reads stay aligned with sends, then
+                // keep clocking.
+                console.warn("Game-loop read error, recovering:", err);
+                if (this.gameLoopActive) {
+                    this.serial.flushReads();
+                    setTimeout(() => { if (this.gameLoopActive) this.startGameTimer(); }, 50);
+                }
             });
         };
         tick();
     }
 
     performSeriesEndRehandshake() {
-        // After 3 wins or 3 losses the GB finishes its win/loss animation,
-        // sits briefly on the per-round result screen (waiting for 0x55),
-        // then — because the series is over — 0x55 drops it to the title
-        // screen instead of a new round. From the title screen the start
-        // handshake (0x01 -> 0x02) returns it to difficulty-select. The
-        // animation length varies (longest when we won by the opponent
-        // topping out), so attemptSeriesEndHandshake alternates 0x55/0x01
-        // until it lands rather than timing a single 0x55 against it.
-        console.log("Series-end rehandshake scheduled (1s delay)");
+        // After 3 wins or 3 losses the GB sits on the win/loss screen. To get
+        // it back to difficulty-select for the next game:
+        //   1. send 0x55 -> GB advances to the main menu.
+        //   2. run the 0x01 -> 0x02 start handshake -> GB lands on difficulty.
+        // The GB is silent on BOTH the win/loss screen and the main menu, and
+        // the win handshake can finish before the win animation has played, so
+        // we can't tell when the GB is ready for the 0x55 — we just wait ~3s.
+        // If that 0x55 was still too early, attemptSeriesEndHandshake re-sends
+        // it, but ONLY while 0x01 keeps going unanswered: an answered 0x01
+        // means the GB already reached the menu, where a stray 0x55 would start
+        // the next game. That gate is what makes the resend safe.
+        console.log("Series-end rehandshake scheduled (3s delay)");
         setTimeout(() => {
             if (!this.needsRehandshake) {
                 console.log("Series-end rehandshake aborted (flag cleared)");
                 return;
             }
-            this.serial.clearBuffer();
-            this._seriesEndProbe = 0x55;
-            this.attemptSeriesEndHandshake();
-        }, 1000);
+            this.serial.flushReads();
+            this._seriesEndTries = 0;
+            this.sendSeriesEndAdvance();
+        }, 3000);
+    }
+
+    // Send a single 0x55 to push the GB from the win/loss screen to the main
+    // menu, then resume the 0x01 handshake. Balanced send+read so the 0x55
+    // reply can't desync later reads.
+    sendSeriesEndAdvance() {
+        if (!this.needsRehandshake) return;
+        console.log("Series-end: sending 0x55 to advance to the main menu");
+        const resume = () => {
+            setTimeout(() => {
+                if (!this.needsRehandshake) return;
+                this.attemptSeriesEndHandshake();
+            }, 750);
+        };
+        this.serial.send(new Uint8Array([0x55]));
+        this.serial.read(64).then(resume, resume);
     }
 
     attemptSeriesEndHandshake() {
         if (!this.needsRehandshake) return;
-        // Alternate 0x55 (dismiss the per-round result screen) and 0x01
-        // (probe the title screen) until the GB answers 0x01 with 0x02. This
-        // is timing-independent: a 0x55 on the title screen and a 0x01 on the
-        // result screen are both ignored, so the alternation can't get stuck
-        // no matter how long the win/loss animation takes to finish.
-        const probe = this._seriesEndProbe === 0x01 ? 0x01 : 0x55;
-        this.serial.send(new Uint8Array([probe]));
+        // Drive the main menu -> difficulty-select with the start handshake,
+        // exactly like the initial connection: send 0x01, retry until 0x02.
+        this.serial.sendHex("01");
         this.serial.readHex(64).then(result => {
             if (!this.needsRehandshake) return;
             if (result === "02") {
@@ -1037,11 +1069,20 @@ class OnlineYoshi {
                 }
                 return;
             }
-            this._seriesEndProbe = probe === 0x55 ? 0x01 : 0x55;
-            setTimeout(() => this.attemptSeriesEndHandshake(), 50);
+            // 0x01 went unanswered. After ~3s of that the GB never left the
+            // win/loss screen (the menu answers 0x02 immediately), so the 0x55
+            // was sent too early — re-send it. Safe precisely because 0x01 is
+            // still failing: the GB can't be on the menu/difficulty screen
+            // where a stray 0x55 would launch the next game.
+            this._seriesEndTries++;
+            if (this._seriesEndTries >= 30) {
+                this._seriesEndTries = 0;
+                this.sendSeriesEndAdvance();
+                return;
+            }
+            setTimeout(() => this.attemptSeriesEndHandshake(), 100);
         }, error => {
             console.error("Series-end rehandshake transferIn error:", error);
-            this._seriesEndProbe = probe === 0x55 ? 0x01 : 0x55;
             setTimeout(() => this.attemptSeriesEndHandshake(), 100);
         });
     }

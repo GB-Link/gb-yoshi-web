@@ -313,6 +313,12 @@ class Serial {
         console.log("Buffer cleared for priority command");
     }
 
+    // API parity with SerialWS.flushReads(). WebUSB has no JS-side receive
+    // queue — unread replies are dropped by the device rather than buffered —
+    // so there is nothing to discard here.
+    flushReads() {
+    }
+
     bufSendFunction() {
         this.send_active = true;
         if (this.buffer.length === 0) {
