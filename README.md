@@ -5,7 +5,7 @@ Web frontend for online Game Boy Yoshi multiplayer. Connects to a Game Boy via W
 ## Requirements
 
 - Chrome or Edge browser (for WebUSB support)
-- [GBLink firmware](https://github.com/starlarkus/GBLink-Firmware) or [reconfigurable firmware (legacy)](https://github.com/starlarkus/gb-link-firmware-reconfigurable)
+- [GB-Link firmware](https://github.com/starlarkus/GBLink-Firmware) or [reconfigurable firmware (legacy)](https://github.com/starlarkus/gb-link-firmware-reconfigurable)
 - Game Boy with Yoshi cartridge
 
 ## HTTPS Note
