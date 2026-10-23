@@ -54,6 +54,8 @@ python3 server.py
 
 The server runs on port `5678` by default. Configure your reverse proxy (nginx, caddy, etc.) to forward WebSocket connections to this port. If running alongside the gb-tetris-server on the same host, change the port in `server.py` (`websockets.serve(... 5678 ...)`) to a free port (e.g. `5679`).
 
+Copy `server/template.env` to `server/.env`. `REPORT_TOKEN` is the shared secret for `GET` status reports on WebSocket path `/report`. If it is missing or blank, `/report` does not exist (HTTP 404 before the handshake). A request is `{"type":"get_report","token":"..."}`.
+
 ## Auto-start
 
 ```bash
