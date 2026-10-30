@@ -14,6 +14,7 @@
 
   <!-- Custom CSS -->
   <link rel="stylesheet" href="css/index.css">
+  <link rel="stylesheet" href="css/emulator.css">
 
   <style>
     .bd-placeholder-img {
@@ -44,6 +45,8 @@
       <div class="inner"></div>
     </header>
 
+    <div class="play-area">
+    <div id="emu-host" class="emu-host"></div>
     <main role="main" class="inner cover">
       <div id="root">
 
@@ -53,9 +56,19 @@
           <h2 class="cover-heading">Yoshilink</h2>
           <p class="lead">Connect your Game Boy, boot Yoshi, and start playing with your friends!</p>
           <hr />
-          <h4>Connect your Game Boy</h4>
-          <p>Connect your Game Boy with the USB to Game Link adapter and click "connect".</p>
-          <button id="btn-connect" class="btn btn-lg btn-secondary">Connect USB</button>
+          <div class="connect-hardware">
+            <h4>Connect your Game Boy</h4>
+            <p id="connect-instructions">Connect your Game Boy with the USB to Game Link adapter and click "connect".</p>
+            <button id="btn-connect" class="btn btn-lg btn-secondary">Connect USB</button>
+          </div>
+          <div id="emu-offer" class="emu-offer">
+            <p id="emu-offer-text">No Game Boy at hand? Play Yoshi in your browser with your own ROM.</p>
+            <button id="btn-emulator" class="btn btn-lg btn-secondary">Use emulator</button>
+          </div>
+          <div class="emu-waiting">
+            <h4>Load your Yoshi ROM</h4>
+            <p>Once it's running in the emulator, it links up here just like a Game Boy on the adapter.</p>
+          </div>
           <br />
           <small>Version: 0.2.1</small>
         </div>
@@ -221,14 +234,9 @@
           <h3 id="error-message"></h3>
         </div>
 
-        <!-- Screen: No WebUSB -->
-        <div id="screen-no-webusb" class="screen connect">
-          <h2>Sorry, your browser supports neither WebUSB nor WebSerial!</h2>
-          <p>Use Chrome/Edge (WebUSB or WebSerial) or Firefox 151+ (WebSerial).</p>
-        </div>
-
       </div>
     </main>
+    </div>
 
     <footer class="mastfoot mt-auto">
       <div class="inner">

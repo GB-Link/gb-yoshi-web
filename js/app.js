@@ -20,6 +20,14 @@ class OnlineYoshi {
     StateMatchmaking = "Matchmaking";
     StateOpponentDisconnect = "OpponentDisconnect";
 
+    // States where the emulated Game Boy may be reset or swapped (no lobby open)
+    EmulatorFreeStates = ["Connect", "Connecting", "ConnectingYoshi", "ModeSelect", "SelectGame", "StateError"];
+
+    // End-of-round handshakes: the GB has left its win/loss state once it stays
+    // quiet this long; give up after the timeout
+    HANDSHAKE_QUIET_MS = 150;
+    HANDSHAKE_TIMEOUT_MS = 3000;
+
     // Player states (sync with server)
     STATE_ALIVE = 0;
     STATE_DEAD = 1;
@@ -37,6 +45,8 @@ class OnlineYoshi {
         this.isMatchmaking = false;
         this.serial = null;
         this.gb = null;
+        this.emulator = null; // in-page Game Boy (js/emulator/EmulatorPanel.js), once opened
+        this.handshakeRun = 0;
 
         // Game loop state
         this.gameLoopActive = false;
@@ -46,12 +56,15 @@ class OnlineYoshi {
         this.hatchQueue = [];           // bytes 0x40-0x47 to send to local GB once each
         this.lastSentMaxSlots = 0;       // last partner-slot byte we wrote (avoid log spam)
         this.difficultyTimerActive = false; // poll the GB for level/speed changes pre-match
-        // End-of-round handshake state (BGB-debugged per Yoshi protocol).
+        // End-of-round handshake state.
         this.lossPending = false;        // local GB lost — reply 0x81 until GB stops sending 0x80
         this.winPending = false;         // local GB won or server-told win — send 0x80 until GB leaves win-state
         this.winTickCount = 0;           // ticks elapsed since winPending started
         this.lossTickCount = 0;          // ticks elapsed since lossPending started
-        this.lossClearStreak = 0;        // consecutive non-0x80 reads during the loss handshake
+        this.winStartedAt = 0;
+        this.winStateSeenAt = 0;         // last time the GB answered C3/81 (win-state)
+        this.lossStartedAt = 0;
+        this.lossStateSeenAt = 0;        // last time the GB answered 0x80 (loss-state)
         this.forceLossPending = false;   // server-told loss — send 0xC3 until GB enters loss-state (0x80)
         this.roundConfirmed = false;     // GB has emitted an in-round byte this round; gates win/loss bytes against stale leftovers from the prior round
         this.winsThisSeries = 0;
@@ -62,11 +75,6 @@ class OnlineYoshi {
     }
 
     init() {
-        if (!navigator.usb && !navigator.serial) {
-            this.showScreen('screen-no-webusb');
-            return;
-        }
-
         // Load saved username or generate a random one
         var savedName = localStorage.getItem('yoshi_username');
         document.getElementById('username').value = savedName || this.generateName();
@@ -106,7 +114,14 @@ class OnlineYoshi {
         if (this.transport) {
             connectBtn.textContent = this.transport === 'usb' ? 'Connect USB' : 'Connect Serial';
             connectBtn.addEventListener('click', () => this.handleConnectClick(this.transport));
+        } else {
+            // Neither WebUSB (Chrome/Edge) nor WebSerial (Firefox 151+, Chrome, Edge): the emulator still works
+            connectBtn.style.display = 'none';
+            document.getElementById('connect-instructions').textContent =
+                'This browser can\'t use the USB adapter (Chrome, Edge or Firefox 151 and later can).';
+            document.getElementById('emu-offer-text').textContent = 'You can still play Yoshi in your browser with your own ROM.';
         }
+        document.getElementById('btn-emulator').addEventListener('click', () => this.handleEmulatorClick());
 
         // Create/Join game buttons
         document.getElementById('btn-create-game').addEventListener('click', () => {
@@ -229,6 +244,7 @@ class OnlineYoshi {
     // Set state and update UI
     setState(newState) {
         this.currentState = newState;
+        if (this.emulator) this.emulator.setLocked(!this.EmulatorFreeStates.includes(newState));
         this.updateUI();
     }
 
@@ -380,10 +396,54 @@ class OnlineYoshi {
         });
     }
 
-    attemptYoshiConnection() {
+    // In-page emulator: the player's own Yoshi ROM instead of a Game Boy on the adapter
+    handleEmulatorClick() {
+        if (this.emulator) {
+            this.emulator.open();
+            return;
+        }
+        const button = document.getElementById('btn-emulator');
+        button.disabled = true;
+        import('./emulator/EmulatorPanel.js').then(({ EmulatorPanel }) => {
+            this.emulator = new EmulatorPanel(document.getElementById('emu-host'), {
+                game: { name: 'Yoshi', identify: identifyYoshi },
+                emulatorUrl: 'emulator/',
+                workletUrl: 'js/emulator/audio-worklet.js',
+                storeName: 'gblink-yoshi-emulator',
+                buttonClass: 'btn btn-secondary',
+                onStart: (serial) => this.handleEmulatorStart(serial),
+                onClose: () => this.handleEmulatorClose(),
+            });
+            this.emulator.setLocked(!this.EmulatorFreeStates.includes(this.currentState));
+            return this.emulator.open();
+        }).catch(e => {
+            console.error('Emulator unavailable:', e);
+            document.getElementById('emu-offer-text').textContent = 'The emulator could not be loaded in this browser.';
+        }).finally(() => {
+            button.disabled = false;
+        });
+    }
+
+    // A game is running in the emulator (or was just reset): link to it like a newly connected Game Boy
+    handleEmulatorStart(serial) {
+        this.serial = serial;
+        this.difficultyTimerActive = false;
+        this.setState(this.StateConnectingYoshi);
+        this.attemptYoshiConnection();
+    }
+
+    handleEmulatorClose() {
+        this.handshakeRun++;
+        this.difficultyTimerActive = false;
+        this.serial = null;
+        this.setState(this.StateConnect);
+    }
+
+    attemptYoshiConnection(run = ++this.handshakeRun) {
         console.log("Attempt connection...");
         this.serial.sendHex("01");
         this.serial.readHex(64).then(result => {
+            if (run !== this.handshakeRun) return;
             if (result === "02") {
                 console.log("SUCCESS!");
                 // Series counters reset on every fresh handshake
@@ -405,11 +465,12 @@ class OnlineYoshi {
             } else {
                 console.log("Fail");
                 setTimeout(() => {
-                    this.attemptYoshiConnection();
+                    if (run === this.handshakeRun) this.attemptYoshiConnection(run);
                 }, 100);
             }
         },
             error => {
+                if (run !== this.handshakeRun) return;
                 this.currentState = this.StateError;
                 document.getElementById('error-message').textContent = error;
                 this.updateUI();
@@ -709,7 +770,6 @@ class OnlineYoshi {
         this.winPending = false;
         this.winTickCount = 0;
         this.lossTickCount = 0;
-        this.lossClearStreak = 0;
         this.forceLossPending = false;
         this.roundConfirmed = false;
         this._handlingDisconnect = false;
@@ -872,21 +932,17 @@ class OnlineYoshi {
                 if (this.lossPending) {
                     // We reply 0x81 each tick. The GB sends 0x80 until it has
                     // taken enough acks, then transitions to its loss screen and
-                    // goes silent. Require a minimum number of acks AND two
-                    // consecutive non-0x80 reads before completing: a single
-                    // transient non-0x80 byte must not end the handshake before
-                    // the GB has actually left loss-state (that stranded a GB
-                    // once, logging "complete" while it never reached the loss
-                    // screen). A 0x80 resets the streak, so a GB that needs more
-                    // acks just keeps getting them.
+                    // goes silent. It only answers when its link port is ready
+                    // (about once a frame), so other bytes come between its 0x80s
+                    // while it is still in loss-state: require a minimum number of
+                    // acks AND no 0x80 for HANDSHAKE_QUIET_MS before completing
+                    // (ending early once stranded a GB before its loss screen).
+                    const now = Date.now();
+                    if (this.lossTickCount === 0) this.lossStartedAt = this.lossStateSeenAt = now;
                     this.lossTickCount++;
-                    if (lastByte === 0x80) {
-                        this.lossClearStreak = 0;
-                    } else {
-                        this.lossClearStreak++;
-                    }
-                    const lossDone = this.lossTickCount >= 3 && this.lossClearStreak >= 2;
-                    const lossTimedOut = this.lossTickCount >= 30; // ~3s safety
+                    if (bytes.includes(0x80)) this.lossStateSeenAt = now;
+                    const lossDone = this.lossTickCount >= 3 && now - this.lossStateSeenAt >= this.HANDSHAKE_QUIET_MS;
+                    const lossTimedOut = now - this.lossStartedAt >= this.HANDSHAKE_TIMEOUT_MS;
                     if (lossDone || lossTimedOut) {
                         if (lossTimedOut) console.warn("Loss handshake timed out at tick " + this.lossTickCount);
                         else console.log("Loss handshake complete (GB left loss-state)");
@@ -918,7 +974,6 @@ class OnlineYoshi {
                         this.forceLossPending = false;
                         this.lossPending = true;
                         this.lossTickCount = 0;
-                        this.lossClearStreak = 0;
                     }
                     if (this.gameLoopActive) this.startGameTimer();
                     return;
@@ -929,11 +984,19 @@ class OnlineYoshi {
                     // acked exchanges; after that we wait for the GB to leave
                     // its win-state (no longer responding C3 or 81). Both
                     // paths converge here: remote-win flows through 0x81
-                    // ticks, local-win flows through 0xC3 ticks.
+                    // ticks, local-win flows through 0xC3 ticks. When the
+                    // server told us we won, the GB enters its win-state a
+                    // frame or two after the first 0x80, so it must have shown
+                    // it, then stayed quiet for HANDSHAKE_QUIET_MS.
+                    const now = Date.now();
+                    if (this.winTickCount === 0) {
+                        this.winStartedAt = now;
+                        this.winStateSeenAt = 0;
+                    }
                     this.winTickCount++;
-                    const stillInWinState = (lastByte === 0xC3 || lastByte === 0x81);
-                    const handshakeDone = this.winTickCount >= 3 && !stillInWinState;
-                    const timedOut = this.winTickCount >= 30; // ~3s safety
+                    if (bytes.some((v) => v === 0xC3 || v === 0x81)) this.winStateSeenAt = now;
+                    const handshakeDone = this.winTickCount >= 3 && this.winStateSeenAt > 0 && now - this.winStateSeenAt >= this.HANDSHAKE_QUIET_MS;
+                    const timedOut = now - this.winStartedAt >= this.HANDSHAKE_TIMEOUT_MS;
                     if (handshakeDone || timedOut) {
                         if (timedOut) console.warn("Win handshake timed out at tick " + this.winTickCount);
                         else console.log("Win handshake complete after " + this.winTickCount + " ticks");
@@ -996,7 +1059,6 @@ class OnlineYoshi {
                         console.log("Local GB lost - entering loss handshake");
                         this.lossPending = true;
                         this.lossTickCount = 0;
-                        this.lossClearStreak = 0;
                         break;
                     } else if (value === 0xC3) {
                         // Local GB won (cleared all slots). Tell the server so
@@ -1168,6 +1230,14 @@ class OnlineYoshi {
             }
         }, 1000);
     }
+}
+
+// Yoshi (USA, Japan) and Mario & Yoshi (Europe) from the ROM header
+function identifyYoshi(rom) {
+    const title = String.fromCharCode(...rom.subarray(0x134, 0x144)).replace(/\0+$/, '');
+    if (title === 'YOSSY NO TAMAGO') return { title: rom[0x14A] === 0 ? 'Yoshi no Tamago' : 'Yoshi' };
+    if (title === 'MARIO & YOSHI') return { title: 'Mario & Yoshi' };
+    return null;
 }
 
 // Initialize application when DOM is ready
