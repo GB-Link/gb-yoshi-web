@@ -194,6 +194,47 @@ body {
   margin-bottom: 20px;
 }
 
+/* Supported games on the connect screen */
+.supported-games {
+  list-style: none;
+  padding: 0;
+  margin-bottom: 1rem;
+}
+
+.supported-games li {
+  display: inline-block;
+  margin: 0 .5rem;
+  font-weight: 700;
+}
+
+/* Yoshi's Cookie lobby */
+.cookie-players {
+  list-style: none;
+  padding: 0;
+  font-weight: 700;
+}
+
+.cookie-status {
+  font-size: 1.25rem;
+  margin-top: 1rem;
+}
+
+#btn-cookie-again {
+  margin-right: 10px;
+}
+
+.cookie-controls {
+  margin-bottom: 1.5rem;
+}
+
+.cookie-controls .musicButton {
+  margin-bottom: 10px;
+}
+
+.cookie-reset {
+  margin-top: 1rem;
+}
+
 .custom-card {
   background-color: #444;
   height: 100%;

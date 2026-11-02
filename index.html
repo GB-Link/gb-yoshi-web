@@ -55,6 +55,11 @@
           <img src="images/animation.gif" class="gameboy" alt="Game Boy" />
           <h2 class="cover-heading">Yoshilink</h2>
           <p class="lead">Connect your Game Boy, boot Yoshi, and start playing with your friends!</p>
+          <h4>Supported games</h4>
+          <ul class="supported-games">
+            <li>Yoshi</li>
+            <li>Yoshi's Cookie</li>
+          </ul>
           <hr />
           <div class="connect-hardware">
             <h4>Connect your Game Boy</h4>
@@ -84,6 +89,38 @@
           <p>Ensure your Game Boy is turned on and in the Yoshi main menu.</p>
         </div>
 
+        <!-- Screen: Yoshi's Cookie setup -->
+        <div id="screen-cookie-setup" class="screen connect">
+          <h2>Yoshi's Cookie connected</h2>
+          <p id="cookie-setup-status" class="cookie-status"></p>
+          <div class="cookie-controls-slot">
+            <div id="cookie-controls" class="cookie-controls">
+              <h4>Choose your tunes:</h4>
+              <button class="musicButton btn btn-lg btn-secondary" data-music="0">MUSIC A</button>
+              <button class="musicButton btn btn-lg btn-secondary" data-music="1">MUSIC B</button><br />
+              <button class="musicButton btn btn-lg btn-secondary" data-music="2">MUSIC C</button>
+              <button class="musicButton btn btn-lg btn-secondary" data-music="3">MUSIC OFF</button>
+            </div>
+          </div>
+          <button id="btn-cookie-next" class="btn btn-lg btn-secondary">Next</button>
+          <p class="cookie-reset"><button class="btn btn-sm btn-secondary">My Game Boy was reset</button></p>
+        </div>
+
+        <!-- Screen: a Yoshi's Cookie lobby -->
+        <div id="screen-cookie" class="screen connect">
+          <h2 id="cookie-heading"></h2>
+          <h4>Players:</h4>
+          <ul id="cookie-players" class="cookie-players"></ul>
+          <p id="cookie-status" class="cookie-status"></p>
+          <p id="cookie-note"></p>
+          <div class="cookie-controls-slot"></div>
+          <button id="btn-cookie-start" class="btn btn-lg btn-secondary">Start the match</button>
+          <hr />
+          <button id="btn-cookie-again" class="btn btn-lg btn-secondary">Find another match</button>
+          <button id="btn-leave-cookie" class="btn btn-sm btn-secondary">Leave Lobby</button>
+          <p class="cookie-reset"><button class="btn btn-sm btn-secondary">My Game Boy was reset</button></p>
+        </div>
+
         <!-- Screen: Mode Selection (Find Match / Private Lobby) -->
         <div id="screen-mode-select" class="screen connect">
           <h2>Select a username:</h2>
@@ -102,12 +139,14 @@
               </div>
             </div>
           </div>
-          <hr />
-          <p>Game Boy selection: <strong><span class="js-difficulty-display">Level 1 / Low</span></strong></p>
-          <p><small>Change Level / Speed on your Game Boy at any time before the match.</small></p>
-          <hr />
-          <button id="btn-reinit-gameboy" class="btn btn-sm btn-secondary">Reconnect Game Boy</button>
-          <p><small>Use this if you restarted your Game Boy</small></p>
+          <div id="reinit-gameboy">
+            <hr />
+            <p>Game Boy selection: <strong><span class="js-difficulty-display">Level 1 / Low</span></strong></p>
+            <p><small>Change Level / Speed on your Game Boy at any time before the match.</small></p>
+            <hr />
+            <button id="btn-reinit-gameboy" class="btn btn-sm btn-secondary">Reconnect Game Boy</button>
+            <p><small>Use this if you restarted your Game Boy</small></p>
+          </div>
         </div>
 
         <!-- Screen: Matchmaking (Finding Opponent) -->
@@ -117,9 +156,11 @@
           <div class="spinner-border text-light" role="status">
             <span class="sr-only">Loading...</span>
           </div>
-          <hr />
-          <p>Your selection: <strong><span class="js-difficulty-display">Level 1 / Low</span></strong></p>
-          <p><small>You can still change Level / Speed on your Game Boy.</small></p>
+          <div class="yoshi-only">
+            <hr />
+            <p>Your selection: <strong><span class="js-difficulty-display">Level 1 / Low</span></strong></p>
+            <p><small>You can still change Level / Speed on your Game Boy.</small></p>
+          </div>
           <hr />
           <button id="btn-cancel-matchmaking" class="btn btn-lg btn-secondary">Cancel</button>
         </div>

@@ -42,6 +42,20 @@ matchmaking_queue = []  # List of Client objects waiting for a match
 connected_clients = set()
 peak_player_count = 0
 
+# Clients say which game they play when they register. Yoshi uses the game logic
+# below. For any other game (Yoshi's Cookie) the server only pairs two players of
+# that game and relays messages between their pages.
+CLASSIC_KIND = "yoshi"
+RELAY_PLAYERS = 2
+
+def parse_kind(value):
+    if not isinstance(value, str) or not value:
+        return CLASSIC_KIND
+    kind = value.strip().lower()[:24]
+    if not kind or not all(ch.isalnum() or ch == "-" for ch in kind):
+        return CLASSIC_KIND
+    return kind
+
 # Because Python sucks
 class Game:
     pass
@@ -55,8 +69,9 @@ class Client:
     STATE_DEAD = 1
     STATE_WINNER = 2
 
-    def __init__(self, socket, name):
+    def __init__(self, socket, name, kind=CLASSIC_KIND):
         self.game = None
+        self.kind = kind
         self.name = name
         self.uuid = str(uuid.uuid4())
         self.socket = socket
@@ -75,8 +90,12 @@ class Client:
             if self.game.state == Game.GAME_STATE_FINISHED:
                 print("Game finished")
                 return
+            data = json.loads(msg)
+            if isinstance(data, dict) and data.get("type") == "relay":
+                await self.game.relay(self, data.get("data"))
+                continue
             print("Await..")
-            await self.game.process(self, json.loads(msg))
+            await self.game.process(self, data)
             print("Post process...")
     
 
@@ -99,7 +118,8 @@ class Client:
             "state": self.state,
             "uuid": self.uuid,
             "num_wins": self.num_wins,
-            "difficulty": self.difficulty
+            "difficulty": self.difficulty,
+            "game": self.kind
         }
 
 class Game:
@@ -155,6 +175,7 @@ class Game:
 
     def __init__(self, admin_socket, is_matchmaking=False):
         self.name = self._generate_name()
+        self.kind = admin_socket.kind
         self.admin_socket = admin_socket
         self.clients = [admin_socket]
         self.state = self.GAME_STATE_LOBBY
@@ -173,8 +194,26 @@ class Game:
             "name": self.name,
             "status": self.state,
             "users": users,
-            "admin_uuid": self.admin_socket.uuid if self.admin_socket else None
+            "admin_uuid": self.admin_socket.uuid if self.admin_socket else None,
+            "game": self.kind
         }
+
+    @property
+    def is_relay(self):
+        return self.kind != CLASSIC_KIND
+
+    async def relay(self, sender, data):
+        """Forwards a relayed message unchanged to the other players."""
+        if not self.is_relay or sender not in self.clients:
+            return
+        msg = json.dumps({"type": "relay", "data": data, "from": sender.uuid})
+        for c in list(self.clients):
+            if c is sender:
+                continue
+            try:
+                await c.socket.send(msg)
+            except websockets.exceptions.ConnectionClosed:
+                await self.handle_client_disconnect(c)
 
     async def send_lines(self, lines, sender_uuid):
         for c in list(self.clients):
@@ -279,6 +318,9 @@ class Game:
 
     async def process(self, client, msg):
         print(f"Processing {client.name} with msg {msg}")
+        if self.is_relay:
+            # Relayed games are run by the clients
+            return
         if msg["type"] == "start":
             # Check if game state is correct.
             if self.state != self.GAME_STATE_LOBBY and self.state != self.GAME_STATE_BETWEEN:
@@ -429,8 +471,17 @@ class Game:
                 await self.send_gameinfo()
 
         elif self.state == self.GAME_STATE_LOBBY:
-            # Notify remaining players about updated roster
-            await self.send_gameinfo()
+            if self.is_relay and self.is_matchmaking:
+                # Relayed match: tell the remaining player so they can find a new one
+                for c in list(self.clients):
+                    try:
+                        await c.send(json.dumps({"type": "opponent_disconnect"}))
+                    except websockets.exceptions.ConnectionClosed:
+                        pass
+                self.state = self.GAME_STATE_FINISHED
+            else:
+                # Notify remaining players about updated roster
+                await self.send_gameinfo()
 
         # If no clients left, mark game as finished and clean up
         if len(self.clients) == 0:
@@ -475,6 +526,12 @@ async def release_client(client):
         game.pending_clients.remove(client)
     await game.handle_client_disconnect(client)
 
+def players_by_game():
+    counts = {}
+    for c in connected_clients:
+        counts[c.kind] = counts.get(c.kind, 0) + 1
+    return counts
+
 def build_report():
     now = time.time()
     by_state = {"lobby": 0, "running": 0, "between": 0}
@@ -500,6 +557,7 @@ def build_report():
         "started_at": int(SERVER_STARTED_AT),
         "uptime_seconds": int(now - SERVER_STARTED_AT),
         "connected_players": len(connected_clients),
+        "players_by_game": players_by_game(),
         "peak_player_count": peak_player_count,
         "matchmaking_waiting": len(matchmaking_queue),
         "games": {
@@ -611,11 +669,12 @@ async def newserver(websocket):
         await websocket.send(json.dumps(error))
         return
     name = msg["name"]
+    kind = parse_kind(msg.get("game"))
 
-    print(f"New client with name: {name}")
-    
+    print(f"New client with name: {name} ({kind})")
+
     # Next we create a client structure
-    client = Client(websocket, name)
+    client = Client(websocket, name, kind)
     track_client(client)
     try:
         await _handle_client(websocket, path, client)
@@ -626,7 +685,8 @@ async def _handle_client(websocket, path, client):
     # Send uuid to client
     await client.send(json.dumps({
         "type": "user_info",
-        "uuid": client.uuid
+        "uuid": client.uuid,
+        "relay": True
     }))
 
     # Either create a new game
@@ -678,6 +738,19 @@ async def _handle_client(websocket, path, client):
             }
             await websocket.send(json.dumps(error))
             return
+        if game.kind != client.kind:
+            await websocket.send(json.dumps({
+                "type": "error",
+                "msg": "Wrong game.",
+                "game": game.kind
+            }))
+            return
+        if game.is_relay and len(game.clients) >= RELAY_PLAYERS:
+            await websocket.send(json.dumps({
+                "type": "error",
+                "msg": "Lobby is full."
+            }))
+            return
 
         client.set_game(game)
 
@@ -712,13 +785,15 @@ async def _handle_client(websocket, path, client):
     elif(path == "/matchmake"):
         print("Matchmaking request")
         client.match_event = asyncio.Event()
+        partner = next((c for c in matchmaking_queue if c.kind == client.kind), None)
         matchmaking_queue.append(client)
 
-        # Check if we can pair players
-        if len(matchmaking_queue) >= 2:
-            # Pop two players from the queue
-            player1 = matchmaking_queue.pop(0)
-            player2 = matchmaking_queue.pop(0)
+        # Check if we can pair players (of the same game)
+        if partner is not None:
+            matchmaking_queue.remove(partner)
+            matchmaking_queue.remove(client)
+            player1 = partner
+            player2 = client
 
             print(f"Pairing {player1.name} with {player2.name}")
 
@@ -743,8 +818,12 @@ async def _handle_client(websocket, path, client):
             await player1.send(json.dumps(match_info))
             await player2.send(json.dumps(match_info))
 
-            # Auto-start the game
-            await new_game.start_game()
+            if new_game.is_relay:
+                # Relayed games are started by the clients
+                await new_game.send_gameinfo()
+            else:
+                # Auto-start the game
+                await new_game.start_game()
 
             # Signal player1 to break out of wait loop and start processing
             player1.match_event.set()
@@ -813,16 +892,18 @@ async def _handle_client(websocket, path, client):
 
 
 
+PORT = int(os.getenv("PORT") or 5678)
+
 async def main():
     async with websockets.serve(
         newserver,
         "0.0.0.0",
-        5678,
+        PORT,
         ping_interval=5,
         ping_timeout=5,
         process_request=process_request,
     ):
-        print("WebSocket server started on port 5678")
+        print(f"WebSocket server started on port {PORT}")
         print(
             "Report endpoint /report: enabled"
             if REPORT_TOKEN

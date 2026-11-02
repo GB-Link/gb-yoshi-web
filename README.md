@@ -2,11 +2,16 @@
 
 Web frontend for online Game Boy Yoshi multiplayer. Connects to a Game Boy via WebUSB or WebSerial, or runs Yoshi in the browser, and to the game server via WebSockets.
 
+## Supported games
+
+- Yoshi (Mario & Yoshi)
+- Yoshi's Cookie
+
 ## Requirements
 
 - Chrome or Edge browser (for WebUSB support)
 - [GB-Link firmware](https://github.com/starlarkus/GBLink-Firmware) or [reconfigurable firmware (legacy)](https://github.com/starlarkus/gb-link-firmware-reconfigurable)
-- Game Boy with Yoshi cartridge, or your Yoshi ROM to play in the browser
+- Game Boy with one of the supported games, or its ROM to play in the browser
 
 ## Playing in the browser (no Game Boy needed)
 
@@ -16,7 +21,7 @@ Web frontend for online Game Boy Yoshi multiplayer. Connects to a Game Boy via W
 - Keys: arrows, X or A for A, Z or S for B, Enter for Start, Shift for Select. Gamepads work too, and phones get on-screen buttons. The buttons above the screen switch the sound and fullscreen.
 - The browser keeps the ROMs you load, so next time the game is one click away under **Kept in this browser**. **Change game** pauses the game and shows that list. **Reset** restarts the game like switching the Game Boy off and on, and **Close** stops the emulator. These three wait while a match is on.
 - It also works in browsers that can't use the USB adapter, such as phone browsers.
-- Supported ROMs: Yoshi (USA) and Mario & Yoshi (Europe).
+- Supported ROMs: Yoshi (USA), Mario & Yoshi (Europe), and Yoshi's Cookie (below).
 - The emulator is [mGBA](https://mgba.io) 0.10.5 by Jeffrey Pfau and contributors, used under the Mozilla Public License 2.0 (`emulator/LICENSE-mGBA.txt`). Its source is at [github.com/mgba-emu/mgba](https://github.com/mgba-emu/mgba/tree/0.10.5).
 
 ## HTTPS Note
@@ -35,7 +40,7 @@ WebSocket server settings are in `js/gbwebsocket.js`:
 
 # Backend Server
 
-WebSocket server for this client lives in the `server/` subdirectory.
+WebSocket server for this client lives in the `server/` subdirectory. It runs Yoshi games itself. For Yoshi's Cookie it only pairs two players (matchmaking or a private lobby of two) and relays messages between their pages. Set `PORT` to use a port other than 5678.
 
 ## Requirements
 

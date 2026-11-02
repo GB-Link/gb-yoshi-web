@@ -3,6 +3,8 @@
  * Converted from React to vanilla JavaScript
  */
 
+const YOSHI_GAME = 'yoshi';
+
 class OnlineYoshi {
     // Application states
     StateConnect = "Connect";
@@ -19,9 +21,11 @@ class OnlineYoshi {
     StateModeSelect = "ModeSelect";
     StateMatchmaking = "Matchmaking";
     StateOpponentDisconnect = "OpponentDisconnect";
+    StateCookieSetup = "CookieSetup";
+    StateCookie = "Cookie";
 
     // States where the emulated Game Boy may be reset or swapped (no lobby open)
-    EmulatorFreeStates = ["Connect", "Connecting", "ConnectingYoshi", "ModeSelect", "SelectGame", "StateError"];
+    EmulatorFreeStates = ["Connect", "Connecting", "ConnectingYoshi", "ModeSelect", "SelectGame", "StateError", "CookieSetup", "Cookie"];
 
     // End-of-round handshakes: the GB has left its win/loss state once it stays
     // quiet this long; give up after the timeout
@@ -46,6 +50,7 @@ class OnlineYoshi {
         this.serial = null;
         this.gb = null;
         this.emulator = null; // in-page Game Boy (js/emulator/EmulatorPanel.js), once opened
+        this.cookie = null; // Yoshi's Cookie instead of Yoshi (js/cookie/CookieGame.js)
         this.handshakeRun = 0;
 
         // Game loop state
@@ -174,6 +179,24 @@ class OnlineYoshi {
 
         // Reconnect Game Boy button (mode select screen)
         document.getElementById('btn-reinit-gameboy').addEventListener('click', () => this.handleReinitGameboy());
+
+        // Yoshi's Cookie
+        document.getElementById('btn-cookie-next').addEventListener('click', () => this.setState(this.StateModeSelect));
+        document.getElementById('btn-cookie-start').addEventListener('click', () => this.cookie && this.cookie.startMatch());
+        // A Game Boy reset on the adapter can't be seen on the link: the player says so
+        for (const button of document.querySelectorAll('.cookie-reset button')) {
+            button.addEventListener('click', () => this.cookie && this.cookie.restarted());
+        }
+        for (const button of document.querySelectorAll('#cookie-controls [data-music]')) {
+            button.addEventListener('click', () => this.cookie && this.cookie.setMusic(+button.dataset.music));
+        }
+        document.getElementById('btn-cookie-again').addEventListener('click', () => this.handleFindMatch());
+        document.getElementById('btn-leave-cookie').addEventListener('click', () => {
+            // Left during a match: the setup screen shows when the Game Boy is ready again
+            const playing = !!(this.cookie && this.cookie.inMatch);
+            if (this.cookie) this.cookie.close();
+            this.setState(playing ? this.StateCookieSetup : this.StateModeSelect);
+        });
     }
 
     // Hide all screens
@@ -229,9 +252,19 @@ class OnlineYoshi {
                 break;
             case this.StateModeSelect:
                 this.showScreen('screen-mode-select');
+                document.getElementById('reinit-gameboy').style.display = this.cookie ? 'none' : 'block';
+                break;
+            case this.StateCookieSetup:
+                this.showScreen('screen-cookie-setup');
+                if (this.cookie) this.cookie.render();
+                break;
+            case this.StateCookie:
+                this.showScreen('screen-cookie');
+                if (this.cookie) this.cookie.render();
                 break;
             case this.StateMatchmaking:
                 this.showScreen('screen-matchmaking');
+                for (const el of document.querySelectorAll('.yoshi-only')) el.style.display = this.cookie ? 'none' : 'block';
                 break;
             case this.StateOpponentDisconnect:
                 this.showScreen('screen-opponent-disconnect');
@@ -411,7 +444,7 @@ class OnlineYoshi {
                 workletUrl: 'js/emulator/audio-worklet.js',
                 storeName: 'gblink-yoshi-emulator',
                 buttonClass: 'btn btn-secondary',
-                onStart: (serial) => this.handleEmulatorStart(serial),
+                onStart: (serial, info) => this.handleEmulatorStart(serial, info),
                 onClose: () => this.handleEmulatorClose(),
             });
             this.emulator.setLocked(!this.EmulatorFreeStates.includes(this.currentState));
@@ -425,14 +458,49 @@ class OnlineYoshi {
     }
 
     // A game is running in the emulator (or was just reset): link to it like a newly connected Game Boy
-    handleEmulatorStart(serial) {
+    handleEmulatorStart(serial, info) {
+        if (info && info.cookie) {
+            this.startCookie(serial);
+            return;
+        }
+        this.endCookie();
         this.serial = serial;
         this.difficultyTimerActive = false;
         this.setState(this.StateConnectingYoshi);
         this.attemptYoshiConnection();
     }
 
+    // Yoshi's Cookie: the page plays player 1 for this Game Boy (js/cookie/)
+    startCookie(serial) {
+        this.handshakeRun++;
+        this.difficultyTimerActive = false;
+        this.gameLoopActive = false;
+        if (this.gb) {
+            this.gb._closedByUs = true;
+            this.gb.ws.close();
+            this.gb = null;
+        }
+        // Reset: the lobby stays, a match in progress ends and the setup starts again
+        if (this.cookie && this.cookie.serial === serial) {
+            this.cookie.restarted();
+            if (!this.cookie.gb) this.setState(this.StateCookieSetup);
+            return;
+        }
+        this.endCookie();
+        this.serial = serial;
+        import('./cookie/CookieGame.js').then(({ CookieGame }) => {
+            this.cookie = new CookieGame(this, serial);
+            this.setState(this.StateCookieSetup);
+        });
+    }
+
+    endCookie() {
+        if (this.cookie) this.cookie.dispose();
+        this.cookie = null;
+    }
+
     handleEmulatorClose() {
+        this.endCookie();
         this.handshakeRun++;
         this.difficultyTimerActive = false;
         this.serial = null;
@@ -444,6 +512,12 @@ class OnlineYoshi {
         this.serial.sendHex("01");
         this.serial.readHex(64).then(result => {
             if (run !== this.handshakeRun) return;
+            if (result === "FA" || result === "fa") {
+                // Yoshi's Cookie waits on its title with 0xFA
+                console.log("Yoshi's Cookie found");
+                this.startCookie(this.serial);
+                return;
+            }
             if (result === "02") {
                 console.log("SUCCESS!");
                 // Series counters reset on every fresh handshake
@@ -504,10 +578,14 @@ class OnlineYoshi {
     // Mode selection handlers
     handleFindMatch() {
         console.log("Find Match clicked");
+        if (this.cookie) {
+            this.cookie.findMatch(document.getElementById('username')?.value || this.generateName());
+            return;
+        }
         this.isMatchmaking = true;
         this.name = document.getElementById('username')?.value || this.generateName();
         this.setState(this.StateMatchmaking);
-        this.gb = GBWebsocket.findMatch(this.name);
+        this.gb = GBWebsocket.findMatch(this.name, YOSHI_GAME);
         this.setGbCallbacks();
     }
 
@@ -519,6 +597,11 @@ class OnlineYoshi {
 
     handleCancelMatchmaking() {
         console.log("Cancel matchmaking");
+        if (this.cookie) {
+            this.cookie.close();
+            this.setState(this.StateModeSelect);
+            return;
+        }
         if (this.gb) {
             this.gb.cancelMatchmaking();
             this.gb = null;
@@ -575,10 +658,14 @@ class OnlineYoshi {
     handleCreateGame(name) {
         console.log("Create new game");
         console.log(name);
+        if (this.cookie) {
+            this.cookie.create(name);
+            return;
+        }
         this.isAdmin = true;
         this.name = name;
         this.setState(this.StateJoiningGame);
-        this.gb = GBWebsocket.initiateGame(name);
+        this.gb = GBWebsocket.initiateGame(name, YOSHI_GAME);
         this.setGbCallbacks();
     }
 
@@ -593,11 +680,15 @@ class OnlineYoshi {
         console.log("Join game");
         console.log(name);
         console.log(gameCode);
+        if (this.cookie) {
+            this.cookie.join(name, gameCode);
+            return;
+        }
         this.isAdmin = false;
         this.name = name;
         this.gameCode = gameCode;
         this.setState(this.StateJoiningGame);
-        this.gb = GBWebsocket.joinGame(name, gameCode);
+        this.gb = GBWebsocket.joinGame(name, gameCode, YOSHI_GAME);
         this.setGbCallbacks();
     }
 
@@ -661,7 +752,7 @@ class OnlineYoshi {
     gbError(gb, errorMsg) {
         console.error("Game error:", errorMsg);
         // If lobby not found, show a friendly message and return to join screen
-        if (errorMsg === "Game not found." || errorMsg === "Cannot join game") {
+        if (errorMsg === "Game not found." || errorMsg === "Cannot join game" || errorMsg === "Wrong game.") {
             if (this.gb) {
                 this.gb._closedByUs = true;
                 this.gb.ws.close();
@@ -738,7 +829,7 @@ class OnlineYoshi {
 
         const reconnect = () => {
             this.setState(this.StateMatchmaking);
-            this.gb = GBWebsocket.findMatch(this.name);
+            this.gb = GBWebsocket.findMatch(this.name, YOSHI_GAME);
             this.setGbCallbacks();
         };
 
@@ -1237,6 +1328,9 @@ function identifyYoshi(rom) {
     const title = String.fromCharCode(...rom.subarray(0x134, 0x144)).replace(/\0+$/, '');
     if (title === 'YOSSY NO TAMAGO') return { title: rom[0x14A] === 0 ? 'Yoshi no Tamago' : 'Yoshi' };
     if (title === 'MARIO & YOSHI') return { title: 'Mario & Yoshi' };
+    // cookie: played through js/cookie/
+    if (title === "YOSHI'S COOKIE") return { title: "Yoshi's Cookie", cookie: true };
+    if (title === 'YOSSY NO COOKIE') return { title: 'Yoshi no Cookie', cookie: true };
     return null;
 }
 
