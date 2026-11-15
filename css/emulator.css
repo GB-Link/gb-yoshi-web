@@ -239,7 +239,7 @@
     align-items: center;
     gap: 14px 8px;
     margin: 16px auto 0;
-    touch-action: none;
+    touch-action: pan-y;
     user-select: none;
     -webkit-user-select: none;
     -webkit-touch-callout: none;
@@ -290,6 +290,7 @@
   grid-area: ab;
   align-items: flex-start;
   justify-content: flex-end;
+  justify-self: end;
   gap: 14px;
 }
 
@@ -312,6 +313,18 @@
 
 .gbemu-touch .pressed {
   filter: brightness(1.3);
+}
+
+/* The page scrolls from the space between the touch controls; a touch on a button, the d-pad or
+   A and B plays instead. A and B hug their buttons, so the space beside them scrolls too. */
+.gbemu-dpad,
+.gbemu-ab,
+.gbemu-touch [data-key] {
+  touch-action: none;
+}
+
+body.gbemu-fullscreen .gbemu-touch {
+  touch-action: none;
 }
 
 /* Fullscreen: only the game, filling the screen (the Fullscreen API where there is one, the window otherwise) */
